@@ -2,7 +2,7 @@ import os
 import re
 import logging
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pandas as pd
@@ -243,14 +243,14 @@ def run_import(file_path, create_schema=False, use_ssh=False):
                     continue
 
             # insert snapshot for this single row
-            cursor.execute(insert_sql, (
-                wallet_id,
-                r['margin_usd'],
-                r['wallet_bias'],
-                r['position_usd'],
-                r['upnl_usd'],
-                datetime.utcnow()
-            ))
+                cursor.execute(insert_sql, (
+                    wallet_id,
+                    r['margin_usd'],
+                    r['wallet_bias'],
+                    r['position_usd'],
+                    r['upnl_usd'],
+                    datetime.now(timezone.utc)
+                ))
             conn.commit()
 
             if idx % 50 == 0 or idx == total:
