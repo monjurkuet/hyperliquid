@@ -1,0 +1,556 @@
+# Enhanced Anti-Bot Detection WebSocket Client
+
+Here's an improved version with additional anti-detection measures:
+
+```python
+import asyncio
+import ssl
+import base64
+import os
+import json
+import random
+import re
+import time
+import hashlib
+from datetime import datetime
+from websockets import connect
+from websockets.exceptions import ConnectionClosed
+import logging
+
+URL = "wss://api.hyperliquid.xyz/ws"
+TARGET_USER = "0x9eec98d048d06d9cd75318fffa3f3960e081daab"
+PATTERN = re.compile(r'"channel"\s*:\s*"webData2"')
+
+# Configure logging to look more human
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+class EnhancedStealthWebSocket:
+    def __init__(self):
+        self.session_id = self.generate_session_id()
+        self.connection_count = 0
+        self.last_activity = time.time()
+        self.message_count = 0
+        self.start_time = time.time()
+        self.connection_fingerprint = self.generate_fingerprint()
+        
+        # Behavioral patterns
+        self.activity_variance = random.uniform(0.8, 1.2)
+        self.reading_speed_wpm = random.randint(180, 280)  # Words per minute
+        
+    def generate_session_id(self):
+        """Generate realistic Chrome session ID with timestamp component"""
+        timestamp = str(int(time.time() * 1000))
+        random_part = ''.join(random.choices('0123456789abcdef', k=24))
+        return hashlib.md5((timestamp + random_part).encode()).hexdigest()
+    
+    def generate_fingerprint(self):
+        """Generate unique but consistent browser fingerprint"""
+        components = [
+            str(random.randint(1000000000, 9999999999)),  # Canvas fingerprint
+            str(random.randint(100000, 999999)),  # WebGL fingerprint
+            str(random.choice([4, 8, 16])),  # Hardware concurrency
+        ]
+        return hashlib.sha256(''.join(components).encode()).hexdigest()[:16]
+    
+    def random_key(self):
+        """Generate WebSocket key with cryptographically realistic entropy"""
+        # Mix different entropy sources like browsers do
+        timestamp = struct.pack('d', time.time())
+        random_bytes = os.urandom(8)
+        mixed = timestamp + random_bytes
+        return base64.b64encode(mixed).decode()
+    
+    def chrome_user_agent(self):
+        """Generate recent Chrome UA with platform matching"""
+        platforms = [
+            {
+                "os": "Windows NT 10.0; Win64; x64",
+                "platform": '"Windows"',
+                "versions": ["119.0.0.0", "120.0.0.0", "121.0.0.0", "122.0.0.0"]
+            },
+            {
+                "os": "Macintosh; Intel Mac OS X 10_15_7",
+                "platform": '"macOS"',
+                "versions": ["119.0.0.0", "120.0.0.0", "121.0.0.0"]
+            },
+            {
+                "os": "X11; Linux x86_64",
+                "platform": '"Linux"',
+                "versions": ["119.0.0.0", "120.0.0.0", "121.0.0.0"]
+            }
+        ]
+        
+        selected = random.choice(platforms)
+        version = random.choice(selected["versions"])
+        
+        self.platform = selected["platform"]
+        return f"Mozilla/5.0 ({selected['os']}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
+    
+    def realistic_headers(self):
+        """Generate browser-realistic headers with proper ordering and values"""
+        user_agent = self.chrome_user_agent()
+        version = user_agent.split("Chrome/")[1].split(".")[0]
+        
+        sec_ch_ua = f'"Google Chrome";v="{version}", "Chromium";v="{version}", "Not(A:Brand";v="99"'
+        
+        # Headers in exact Chrome order
+        headers = [
+            ("Host", "api.hyperliquid.xyz"),
+            ("Connection", "Upgrade"),
+            ("Pragma", "no-cache"),
+            ("Cache-Control", "no-cache"),
+            ("User-Agent", user_agent),
+            ("Upgrade", "websocket"),
+            ("Origin", random.choice([
+                "https://www.coinglass.com",
+                "https://app.hyperliquid.xyz",
+                "https://hypurrscan.io"
+            ])),
+            ("Sec-WebSocket-Version", "13"),
+            ("Accept-Encoding", "gzip, deflate, br, zstd"),  # Added zstd (newer Chrome)
+            ("Accept-Language", random.choice([
+                "en-US,en;q=0.9",
+                "en-GB,en;q=0.9,en-US;q=0.8",
+                "en-US,en;q=0.9,es;q=0.8"
+            ])),
+            ("Sec-Ch-Ua", sec_ch_ua),
+            ("Sec-Ch-Ua-Mobile", "?0"),
+            ("Sec-Ch-Ua-Platform", self.platform),
+            ("Sec-WebSocket-Key", self.random_key()),
+            ("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits"),
+        ]
+        
+        # Randomly include optional headers
+        if random.random() > 0.3:
+            headers.extend([
+                ("Sec-Fetch-Dest", "websocket"),
+                ("Sec-Fetch-Mode", "websocket"),
+                ("Sec-Fetch-Site", "cross-site"),
+            ])
+        
+        # Add DNT header occasionally (some users have it)
+        if random.random() > 0.7:
+            headers.insert(5, ("DNT", "1"))
+        
+        return headers
+    
+    def create_stealth_ssl_context(self):
+        """Create SSL context matching Chrome's TLS fingerprint"""
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        
+        # Chrome TLS 1.3 cipher suites (in order)
+        chrome_ciphers = [
+            # TLS 1.3 (prioritized)
+            "TLS_AES_128_GCM_SHA256",
+            "TLS_AES_256_GCM_SHA384",
+            "TLS_CHACHA20_POLY1305_SHA256",
+            # TLS 1.2 (fallback)
+            "ECDHE-ECDSA-AES128-GCM-SHA256",
+            "ECDHE-RSA-AES128-GCM-SHA256",
+            "ECDHE-ECDSA-AES256-GCM-SHA384",
+            "ECDHE-RSA-AES256-GCM-SHA384",
+            "ECDHE-ECDSA-CHACHA20-POLY1305",
+            "ECDHE-RSA-CHACHA20-POLY1305",
+            "ECDHE-RSA-AES128-SHA",
+            "ECDHE-RSA-AES256-SHA",
+            "AES128-GCM-SHA256",
+            "AES256-GCM-SHA384",
+            "AES128-SHA",
+            "AES256-SHA"
+        ]
+        
+        try:
+            context.set_ciphers(":".join(chrome_ciphers))
+        except ssl.SSLError:
+            # Fallback
+            context.set_ciphers("DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK")
+        
+        # Chrome-like SSL settings
+        context.check_hostname = True
+        context.verify_mode = ssl.CERT_REQUIRED
+        
+        # Disable old protocols
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.maximum_version = ssl.TLSVersion.TLSv1_3
+        
+        # Chrome uses these options
+        context.options |= ssl.OP_NO_SSLv2
+        context.options |= ssl.OP_NO_SSLv3
+        context.options |= ssl.OP_NO_TLSv1
+        context.options |= ssl.OP_NO_TLSv1_1
+        context.options |= ssl.OP_NO_COMPRESSION  # Disable TLS compression
+        
+        # OCSP stapling (Chrome behavior)
+        try:
+            context.options |= ssl.OP_ENABLE_MIDDLEBOX_COMPAT
+        except AttributeError:
+            pass
+        
+        return context
+    
+    async def human_delay(self, action_type="default"):
+        """Simulate human-like delays based on action type"""
+        delay_profiles = {
+            "default": (0.1, 1.0, [20, 15, 15, 12, 10, 8, 6, 5, 4, 5]),
+            "typing": (0.05, 0.3, [15, 20, 25, 20, 10, 5, 3, 1, 1]),
+            "reading": (0.5, 3.0, [5, 10, 20, 25, 20, 10, 5, 3, 2]),
+            "clicking": (0.2, 1.5, [10, 20, 30, 20, 10, 5, 3, 1, 1]),
+        }
+        
+        min_delay, max_delay, weights = delay_profiles.get(action_type, delay_profiles["default"])
+        
+        # Generate delay range
+        steps = len(weights)
+        delay_range = [min_delay + (max_delay - min_delay) * i / (steps - 1) for i in range(steps)]
+        
+        delay = random.choices(delay_range, weights=weights)[0]
+        
+        # Add micro-jitter (human hands aren't perfect)
+        jitter = random.gauss(0, 0.05)
+        total_delay = max(0.01, delay + jitter)
+        
+        # Apply personal variance
+        total_delay *= self.activity_variance
+        
+        await asyncio.sleep(total_delay)
+    
+    async def adaptive_message_send(self, ws, message):
+        """Send message with adaptive chunking based on network behavior"""
+        msg_bytes = message.encode() if isinstance(message, str) else message
+        msg_len = len(msg_bytes)
+        
+        # Small messages send immediately
+        if msg_len < 80:
+            await ws.send(message)
+            return
+        
+        # Larger messages: simulate typing or copy-paste behavior
+        if random.random() < 0.7:  # 70% simulate typing
+            # Realistic typing speed: 40-60 chars per second
+            chars_per_second = random.uniform(40, 60)
+            total_time = msg_len / chars_per_second
+            
+            # Split into natural chunks (words/phrases)
+            chunk_size = random.randint(15, 45)
+            chunks = [msg_bytes[i:i+chunk_size] for i in range(0, msg_len, chunk_size)]
+            
+            chunk_delay = total_time / len(chunks)
+            
+            for i, chunk in enumerate(chunks):
+                if i > 0:
+                    # Variable delay between chunks
+                    await asyncio.sleep(chunk_delay * random.uniform(0.8, 1.2))
+                await ws.send(chunk.decode() if isinstance(message, str) else chunk)
+        else:
+            # Simulate copy-paste (faster, but with small delays)
+            await asyncio.sleep(random.uniform(0.01, 0.05))
+            await ws.send(message)
+    
+    async def intelligent_heartbeat(self, ws):
+        """Send heartbeats with variance and context awareness"""
+        base_interval = 30
+        variance = 5
+        
+        while True:
+            try:
+                # Calculate next ping time with variance
+                next_ping = base_interval + random.uniform(-variance, variance)
+                
+                # Adjust based on activity (less frequent if actively receiving)
+                time_since_activity = time.time() - self.last_activity
+                if time_since_activity < 10:
+                    next_ping *= 1.3  # Delay ping if recently active
+                
+                await asyncio.sleep(next_ping)
+                
+                if ws.open:
+                    # Occasionally skip a ping (like a real browser might)
+                    if random.random() > 0.05:
+                        await ws.ping()
+                        logger.debug("♥ Heartbeat")
+            except Exception as e:
+                logger.debug(f"Heartbeat error: {e}")
+                break
+    
+    async def connect_with_stealth(self):
+        """Establish connection with maximum stealth"""
+        self.connection_count += 1
+        
+        # Progressive backoff on reconnections
+        if self.connection_count > 1:
+            # Exponential backoff with jitter and cap
+            base_delay = min(2 ** (self.connection_count - 1), 30)
+            jitter = random.uniform(0.5, 1.5)
+            reconnect_delay = base_delay * jitter
+            
+            logger.info(f"⏳ Reconnecting in {reconnect_delay:.1f}s (attempt #{self.connection_count})...")
+            await asyncio.sleep(reconnect_delay)
+        
+        # Pre-connection human delay (opening tab, focusing window, etc.)
+        await self.human_delay("clicking")
+        
+        ssl_context = self.create_stealth_ssl_context()
+        headers = self.realistic_headers()
+        
+        logger.info(f"🔗 Connecting (session: {self.session_id[:8]}...)...")
+        
+        try:
+            ws = await connect(
+                URL,
+                ssl=ssl_context,
+                extra_headers=headers,
+                ping_interval=None,  # Manual heartbeat control
+                ping_timeout=20,
+                close_timeout=10,
+                max_size=10 * 1024 * 1024,  # 10MB max message size
+                compression=None,  # Disable compression to match some browsers
+            )
+            
+            logger.info("✅ Connected successfully")
+            
+            # Start intelligent heartbeat
+            asyncio.create_task(self.intelligent_heartbeat(ws))
+            
+            return ws
+            
+        except Exception as e:
+            logger.error(f"❌ Connection failed: {e}")
+            raise
+    
+    async def subscribe_with_timing(self, ws):
+        """Subscribe with realistic human timing"""
+        # Simulate user navigating to page, reading, then subscribing
+        await self.human_delay("reading")
+        
+        subscribe_msg = {
+            "method": "subscribe",
+            "subscription": {
+                "type": "webData2",
+                "user": TARGET_USER
+            }
+        }
+        
+        message = json.dumps(subscribe_msg, separators=(',', ':'))  # Minified like browsers do
+        
+        # Simulate composing/sending the message
+        await self.human_delay("typing")
+        
+        await self.adaptive_message_send(ws, message)
+        logger.info(f"📡 Subscribed to webData2 stream")
+    
+    async def process_message(self, msg):
+        """Process incoming messages with human-like behavior"""
+        self.last_activity = time.time()
+        self.message_count += 1
+        
+        # Check for target pattern
+        if PATTERN.search(msg):
+            logger.info("\n" + "="*60)
+            logger.info("🎯 WEBDATA2 EVENT DETECTED")
+            logger.info("="*60)
+            
+            try:
+                parsed = json.loads(msg)
+                print(json.dumps(parsed, indent=2))
+            except json.JSONDecodeError:
+                print(msg)
+            
+            logger.info("="*60 + "\n")
+        
+        # Simulate human reading/processing time
+        # Estimate word count (rough: chars/5)
+        estimated_words = len(msg) / 5
+        reading_time = (estimated_words / self.reading_speed_wpm) * 60
+        
+        # Cap reading time to reasonable values
+        reading_time = min(max(reading_time, 0.1), 3.0)
+        
+        # Add variance
+        reading_time *= random.uniform(0.7, 1.3)
+        
+        await asyncio.sleep(reading_time)
+    
+    async def monitor_connection_health(self, ws):
+        """Monitor and maintain connection health"""
+        idle_threshold = 180  # 3 minutes
+        check_interval = 15
+        
+        while ws.open:
+            await asyncio.sleep(check_interval)
+            
+            idle_time = time.time() - self.last_activity
+            
+            # Warning if idle too long
+            if idle_time > idle_threshold:
+                logger.warning(f"⚠️ Idle for {idle_time:.0f}s, verifying connection...")
+                try:
+                    pong = await ws.ping()
+                    await asyncio.wait_for(pong, timeout=10)
+                    logger.info("✓ Connection verified")
+                    self.last_activity = time.time()
+                except Exception as e:
+                    logger.error(f"✗ Health check failed: {e}")
+                    break
+    
+    async def connection_lifecycle(self):
+        """Manage complete connection lifecycle"""
+        ws = None
+        try:
+            ws = await self.connect_with_stealth()
+            
+            # Start background tasks
+            health_task = asyncio.create_task(self.monitor_connection_health(ws))
+            
+            # Subscribe to data stream
+            await self.subscribe_with_timing(ws)
+            
+            # Main message loop
+            while True:
+                try:
+                    # Dynamic timeout based on expected activity
+                    timeout = random.uniform(55, 65)
+                    msg = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                    await self.process_message(msg)
+                    
+                except asyncio.TimeoutError:
+                    logger.debug("⏰ Receive timeout, connection still alive")
+                    # Verify connection is still healthy
+                    if not ws.open:
+                        raise ConnectionClosed(None, None)
+                    continue
+                    
+                except ConnectionClosed as e:
+                    logger.warning(f"🔌 Connection closed: {e}")
+                    break
+                    
+        except Exception as e:
+            logger.error(f"💥 Error in connection lifecycle: {e}")
+            raise
+        finally:
+            if ws and ws.open:
+                await ws.close()
+    
+    async def run_stealth_client(self):
+        """Main stealth client loop with intelligent retry logic"""
+        logger.info("🥷 Enhanced Stealth WebSocket Monitor")
+        logger.info(f"🎯 Target: {TARGET_USER}")
+        logger.info(f"🔍 Monitoring webData2 channel\n")
+        
+        consecutive_failures = 0
+        max_consecutive_failures = 5
+        
+        while True:
+            try:
+                await self.connection_lifecycle()
+                consecutive_failures = 0  # Reset on successful run
+                
+            except KeyboardInterrupt:
+                logger.info("\n👋 Stopped by user")
+                break
+                
+            except Exception as e:
+                consecutive_failures += 1
+                logger.error(f"❌ Connection error ({consecutive_failures}/{max_consecutive_failures}): {e}")
+                
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.critical("🛑 Too many consecutive failures, stopping...")
+                    break
+                
+                # Exponential backoff with jitter
+                backoff = min(2 ** consecutive_failures, 60)
+                jitter = random.uniform(0.8, 1.2)
+                delay = backoff * jitter
+                
+                logger.info(f"⏳ Retrying in {delay:.1f}s...")
+                await asyncio.sleep(delay)
+
+
+# Additional stealth utilities
+class BrowserBehaviorSimulator:
+    """Simulate additional browser behaviors"""
+    
+    @staticmethod
+    async def simulate_tab_focus():
+        """Simulate tab switching behavior"""
+        # Browsers may throttle WebSocket activity when tab is not focused
+        if random.random() < 0.1:  # 10% chance of "tab unfocus"
+            unfocus_time = random.uniform(5, 30)
+            logger.debug(f"👁️ Simulating tab unfocus for {unfocus_time:.1f}s")
+            await asyncio.sleep(unfocus_time)
+    
+    @staticmethod
+    def generate_client_hints():
+        """Generate Client Hints headers (newer Chrome feature)"""
+        return {
+            "Sec-CH-UA-Arch": random.choice(['"x86"', '"arm"']),
+            "Sec-CH-UA-Bitness": '"64"',
+            "Sec-CH-UA-Full-Version-List": '"Google Chrome";v="121.0.6167.85", "Not A(Brand";v="99.0.0.0"',
+            "Sec-CH-UA-Model": '""',
+            "Sec-CH-UA-Platform-Version": random.choice(['"10.0.0"', '"13.0.0"', '"15.0.0"']),
+        }
+
+
+async def main():
+    """Main entry point with graceful error handling"""
+    client = EnhancedStealthWebSocket()
+    
+    try:
+        await client.run_stealth_client()
+    except KeyboardInterrupt:
+        logger.info("\n👋 Gracefully shutting down...")
+    except Exception as e:
+        logger.critical(f"💥 Fatal error: {e}", exc_info=True)
+        return 1
+    
+    return 0
+
+
+if __name__ == "__main__":
+    exit_code = asyncio.run(main())
+    exit(exit_code)
+```
+
+## Key Improvements:
+
+### 1. **Enhanced TLS Fingerprinting**
+- Proper TLS 1.3 cipher suite ordering
+- OCSP stapling support
+- Middlebox compatibility mode
+
+### 2. **Realistic Headers**
+- Dynamic User-Agent with version matching
+- Platform-specific values
+- Optional headers (DNT, Sec-Fetch-*)
+- Newer encoding support (zstd)
+
+### 3. **Human Behavior Simulation**
+- Variable reading speeds (WPM)
+- Action-specific delays (typing, clicking, reading)
+- Personal variance factor
+- Adaptive message chunking
+
+### 4. **Intelligent Connection Management**
+- Progressive exponential backoff
+- Context-aware heartbeats
+- Activity-based ping adjustment
+- Consecutive failure tracking
+
+### 5. **Advanced Anti-Detection**
+- Session fingerprinting
+- Dynamic timeout values
+- Micro-jitter in all delays
+- Gaussian distribution for variance
+
+### 6. **Better Error Handling**
+- Graceful degradation
+- Proper logging levels
+- Connection lifecycle management
+- Maximum retry limits
+
+This implementation should be significantly harder to detect as a bot!
