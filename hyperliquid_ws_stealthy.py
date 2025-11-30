@@ -12,6 +12,10 @@ from websockets import connect
 from websockets.legacy.client import WebSocketClientProtocol
 import threading
 from datetime import datetime, timedelta
+# Import the custom break manager
+from break_manager import BreakManager 
+from data_inserter_env import load_env_config, MySQLStealthClient 
+from hyperliquid_parser import parse_hyperliquid_data
 
 URL = "wss://api.hyperliquid.xyz/ws"
 PATTERN = re.compile(r'"channel"\s*:\s*"webData2"')
@@ -20,17 +24,65 @@ with open('wallets.txt', 'r') as file:
     # Using a list comprehension for concise reading and cleaning
     wallets = [line.strip() for line in file if line.strip()]
 
+# Load configuration once globally
+config = load_env_config()
+db_config = config['DB_CONFIG']
+ssh_config = config['SSH_CONFIG']
+
 class MultiTargetStealthClient:
-    def __init__(self, wallets):
+    def __init__(self, wallets, break_manager):
         self.wallets = wallets
         self.current_wallet_index = 0
         self.session_id = self.generate_session_id()
         self.connection_count = 0
         self.last_activity = time.time()
-        self.collected_data = {}
-        self.wallet_visit_history = {}
-        self.daily_limits = {}
         
+        # Database configurations
+        self.db_config = db_config  
+        self.ssh_config = ssh_config
+
+        # Store the BreakManager instance
+        self.break_manager = break_manager 
+
+    # --- Insertion Helper Method ---
+    def insert_data_point(self, wallet_address, raw_data_json):
+        """
+        Parses the raw JSON string and inserts data into the three database tables 
+        (snapshots, positions, orders).
+        """
+        try:
+            # 1. Parse the JSON message string into a dict
+            full_data_dict = json.loads(raw_data_json)
+            raw_data_dict = full_data_dict.get("data")
+            
+            if not raw_data_dict:
+                print("⚠️ Received JSON is missing the 'data' key.")
+                return
+
+            # 2. Extract snapshot time (needed for the snapshot table)
+            # This is available in the top-level clearinghouseState dict
+            clearinghouse_state = raw_data_dict.get('clearinghouseState', {})
+            snapshot_time_ms = clearinghouse_state.get('time')
+
+            if not snapshot_time_ms:
+                 print("⚠️ Received JSON is missing 'clearinghouseState.time'. Cannot insert.")
+                 return
+
+            # 3. Parse and structure the data for all three tables
+            parsed_data = parse_hyperliquid_data(raw_data_dict)
+            
+            # 4. Insert using the secure client
+            with MySQLStealthClient(self.ssh_config, self.db_config) as client:
+                client.insert_hyperliquid_data(
+                    wallet_address, 
+                    snapshot_time_ms, 
+                    parsed_data,
+                    raw_data_json # Pass the full raw JSON string
+                )
+                
+        except Exception as e:
+            print(f"[❌] FAILED TO INSERT data for {wallet_address}: {e}")
+
     def generate_session_id(self):
         """Generate realistic Chrome session ID"""
         return ''.join(random.choices('0123456789abcdef', k=32))
@@ -52,54 +104,7 @@ class MultiTargetStealthClient:
         current_wallet = self.get_current_wallet()
         print(f"🔄 Switching to wallet: {current_wallet}")
         
-        # Track visit history
-        today = datetime.now().date()
-        if current_wallet not in self.wallet_visit_history:
-            self.wallet_visit_history[current_wallet] = []
-        self.wallet_visit_history[current_wallet].append(datetime.now())
-        
         return current_wallet
-    
-    def should_take_break(self):
-        """Determine if we should take a longer break (human behavior)"""
-        current_wallet = self.get_current_wallet()
-        today = datetime.now().date()
-        
-        # Check daily limits
-        if current_wallet in self.wallet_visit_history:
-            today_visits = [v for v in self.wallet_visit_history[current_wallet] 
-                          if v.date() == today]
-            
-            # Take break after 3-5 visits to same wallet per day
-            if len(today_visits) >= random.randint(3, 5):
-                return True
-        
-        # Random breaks (simulate human getting distracted)
-        if random.random() < 0.15:  # 15% chance
-            return True
-            
-        return False
-    
-    def calculate_human_break_time(self):
-        """Calculate realistic break duration"""
-        break_types = [
-            (300, 900, 0.4),    # 5-15 min (coffee break)
-            (900, 1800, 0.3),   # 15-30 min (lunch break)
-            (1800, 3600, 0.2),  # 30-60 min (meeting)
-            (3600, 7200, 0.1),  # 1-2 hours (long break)
-        ]
-        
-        # Weighted random selection
-        total_weight = sum(weight for _, _, weight in break_types)
-        r = random.random() * total_weight
-        
-        cumulative = 0
-        for min_time, max_time, weight in break_types:
-            cumulative += weight
-            if r <= cumulative:
-                return random.randint(min_time, max_time)
-        
-        return random.randint(300, 900)  # Default
     
     def random_key(self):
         """Generate WebSocket key with realistic entropy"""
@@ -266,24 +271,10 @@ class MultiTargetStealthClient:
                     if PATTERN.search(msg):
                         print(f"\n🎉 DATA COLLECTED FOR {wallet_address}!")
                         print("="*50)
-                        print(msg)
-                        print("="*50)
                         
-                        # Store the data
-                        if wallet_address not in self.collected_data:
-                            self.collected_data[wallet_address] = []
-
-                        self.collected_data[wallet_address].append({
-                            'timestamp': datetime.now().isoformat(),
-                            'data': msg
-                        })
-
-                        try:
-                            parsed = json.loads(msg)
-                            print("📊 Formatted Data:")
-                            print(json.dumps(parsed, indent=2))
-                        except:
-                            pass
+                        # --- INSERTION LOGIC ---
+                        self.insert_data_point(wallet_address, msg)
+                        # -----------------------
 
                         data_collected = True
                         
@@ -318,77 +309,24 @@ class MultiTargetStealthClient:
         
         return data_collected
     
-    async def take_human_break(self):
-        """Take a realistic human break"""
-        break_duration = self.calculate_human_break_time()
-        break_minutes = break_duration / 60
-        
-        break_reasons = [
-            "☕ Coffee break",
-            "🍽️ Lunch break", 
-            "📞 Taking a call",
-            "💭 Thinking break",
-            "🚶 Quick walk",
-            "📧 Checking emails"
-        ]
-        
-        reason = random.choice(break_reasons)
-        print(f"\n{reason} - Taking {break_minutes:.1f} minute break...")
-        print(f"[😴] Break time: {break_minutes:.1f} minutes")
-        print(f"[⏰] Will resume at {(datetime.now() + timedelta(seconds=break_duration)).strftime('%H:%M:%S')}")
-        
-        # Show countdown every minute for long breaks
-        if break_duration > 300:  # 5+ minutes
-            remaining = break_duration
-            while remaining > 0:
-                if remaining > 60:
-                    print(f"[⏳] {remaining//60:.0f} minutes remaining...")
-                    await asyncio.sleep(60)
-                    remaining -= 60
-                else:
-                    await asyncio.sleep(remaining)
-                    remaining = 0
-        else:
-            await asyncio.sleep(break_duration)
-        
-        print("[🔄] Break over, resuming monitoring...")
-    
-    def save_collected_data(self):
-        """Save collected data to file"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"hyperliquid_data_{timestamp}.json"
-    
-        with open(filename, 'w') as f:
-            json.dump(self.collected_data, f, indent=2)
-
-        print(f"[💾] Data saved to {filename}")
-        return filename
-    
     def print_session_summary(self):
         """Print summary of data collection session"""
         print(f"\n{'='*60}")
         print("📊 SESSION SUMMARY")
         print(f"{'='*60}")
         print(f"Total wallets monitored: {len(self.wallets)}")
-        print(f"Data collected for: {len(self.collected_data)} wallets")
         print(f"Total connections made: {self.connection_count}")
-        
-        for wallet, data_list in self.collected_data.items():
-            print(f"  • {wallet}: {len(data_list)} data points")
-        
-        if self.collected_data:
-            filename = self.save_collected_data()
-            print(f"📁 All data saved to: {filename}")
-        
+        print(f"✅ All collected data points were inserted directly into the database.")
         print(f"{'='*60}\n")
     
-    async def run_multi_target_monitor(self, cycles_per_wallet=1, max_total_cycles=None):
-        """Main monitoring loop for multiple wallets"""
+    async def run_multi_target_monitor(self, cycles_per_wallet=1):
+        """
+        Main monitoring loop for multiple wallets, running continuously.
+        """
         print("🥷 Starting Multi-Target Ultra-Stealth Monitor")
         print(f"🎯 Monitoring {len(self.wallets)} wallets")
-        print(f"🔄 {cycles_per_wallet} cycle(s) per wallet")
-        if max_total_cycles:
-            print(f"⏹️ Max total cycles: {max_total_cycles}")
+        print(f"🔄 {cycles_per_wallet} cycle(s) per wallet per rotation")
+        print("♾️ Mode: Continuous (Runs indefinitely)")
         print("="*60)
         
         total_cycles = 0
@@ -398,27 +336,25 @@ class MultiTargetStealthClient:
             while True:
                 current_wallet = self.get_current_wallet()
                 
-                # Check if we've completed enough cycles for this wallet
+                # Check if a full rotation is complete
+                if all(count >= cycles_per_wallet for count in wallet_cycle_count.values()):
+                    # Full rotation complete. Reset counters and take a long break.
+                    print(f"\n=== CONTINUOUS MONITORING ROTATION COMPLETE. STARTING NEW ROTATION ===")
+                    wallet_cycle_count = {wallet: 0 for wallet in self.wallets}
+                    
+                    # Apply a long human break between full rotations
+                    await self.break_manager.take_human_break(is_long_rotation_break=True)
+                    continue # Restart the loop iteration
+                    
+                # If the current wallet is done but others aren't, move on
                 if wallet_cycle_count[current_wallet] >= cycles_per_wallet:
-                    print(f"[✅] Completed {cycles_per_wallet} cycles for {current_wallet}")
-                    
-                    # Check if all wallets are done
-                    if all(count >= cycles_per_wallet for count in wallet_cycle_count.values()):
-                        print("🎉 All wallets completed!")
-                        break
-                    
-                    # Move to next wallet that needs monitoring
+                    print(f"[✅] Completed {cycles_per_wallet} cycles for {current_wallet}. Skipping.")
                     self.advance_to_next_wallet()
                     continue
                 
-                # Check total cycle limit
-                if max_total_cycles and total_cycles >= max_total_cycles:
-                    print(f"[⏹️] Reached maximum cycles limit: {max_total_cycles}")
-                    break
-                
-                # Check if we should take a break
-                if self.should_take_break():
-                    await self.take_human_break()
+                # Check if we should take a break 
+                if self.break_manager.should_take_break():
+                    await self.break_manager.take_human_break(is_long_rotation_break=False)
                 
                 # Collect data for current wallet
                 print(f"\n[🔍] Cycle {wallet_cycle_count[current_wallet] + 1}/{cycles_per_wallet} for {current_wallet}")
@@ -436,17 +372,7 @@ class MultiTargetStealthClient:
                 else:
                     print(f"[⚠️] No data collected for {current_wallet} this cycle")
                 
-                # Inter-wallet delay (human browsing behavior)
-                if wallet_cycle_count[current_wallet] < cycles_per_wallet:
-                    # Same wallet, shorter delay
-                    delay = random.uniform(10, 30)
-                    print(f"[⏸️] Same wallet cooldown: {delay:.1f}s...")
-                else:
-                    # Different wallet, longer delay
-                    delay = random.uniform(30, 90)
-                    print(f"[⏸️] Wallet switch cooldown: {delay:.1f}s...")
-                
-                await asyncio.sleep(delay)
+                # Inter-wallet delay removed - script moves immediately to advance_to_next_wallet
                 
                 # Advance to next wallet
                 self.advance_to_next_wallet()
@@ -458,88 +384,38 @@ class MultiTargetStealthClient:
         finally:
             self.print_session_summary()
 
-# 🎯 Configuration and Usage
+# 🎯 Main function (Continuous Monitoring)
 async def main():
-    """Main function with configuration"""
+    """Main entry point for continuous monitoring."""
     
-    # 📝 CONFIGURATION - Modify these settings
-    wallets_to_monitor = [
-        "0x9eec98d048d06d9cd75318fffa3f3960e081daab",
-        "0x1234567890123456789012345678901234567890",  # Replace with real addresses
-        "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        "0x9876543210987654321098765432109876543210",
-        # Add more wallet addresses here...
-    ]
+    # 1. Initialize the Break Manager with configuration from env
+    BREAK_PROBABILITY = float(config.get('BREAK_PROBABILITY', 0.15))
+    LONG_BREAK_MIN = int(config.get('LONG_BREAK_MIN_SECONDS', 180)) 
+    LONG_BREAK_MAX = int(config.get('LONG_BREAK_MAX_SECONDS', 420))
     
-    # How many times to collect data from each wallet
-    cycles_per_wallet = 2
+    # Removed SAME_DELAY and SWITCH_DELAY configurations as they are no longer used
+    break_manager = BreakManager(
+        BREAK_PROBABILITY, LONG_BREAK_MIN, LONG_BREAK_MAX
+    )
     
-    # Maximum total cycles (optional limit)
-    max_total_cycles = 20  # Set to None for unlimited
+    # wallets is loaded globally from wallets.txt
+    wallets_to_monitor = wallets 
     
-    # Create and run the stealth client
-    client = MultiTargetStealthClient(wallets_to_monitor)
+    # How many times to collect data from each wallet before moving to the next rotation
+    cycles_per_wallet = int(config.get('CYCLES_PER_WALLET', 1))
     
+    # Create and run the stealth client, passing the manager
+    client = MultiTargetStealthClient(wallets_to_monitor, break_manager)
+    
+    # Run indefinitely
     await client.run_multi_target_monitor(
-        cycles_per_wallet=cycles_per_wallet,
-        max_total_cycles=max_total_cycles
+        cycles_per_wallet=cycles_per_wallet
     )
 
-# 🚀 Advanced Usage Examples
-async def continuous_monitoring():
-    """Example: Continuous monitoring with breaks"""  
-    client = MultiTargetStealthClient(wallets)
-    
-    # Run indefinitely with 1 cycle per wallet, then repeat
-    await client.run_multi_target_monitor(
-        cycles_per_wallet=1,
-        max_total_cycles=None  # Infinite
-    )
-
-async def quick_scan():
-    """Example: Quick scan of all wallets once"""
-    wallets = [
-        "0x9eec98d048d06d9cd75318fffa3f3960e081daab",
-        # Add your wallets...
-    ]
-    
-    client = MultiTargetStealthClient(wallets)
-    
-    # Scan each wallet once
-    await client.run_multi_target_monitor(
-        cycles_per_wallet=1,
-        max_total_cycles=len(wallets)
-    )
-
-async def intensive_monitoring():
-    """Example: Intensive monitoring of specific wallets"""
-    high_priority_wallets = [
-        "0x9eec98d048d06d9cd75318fffa3f3960e081daab",
-        # Add high-priority wallets...
-    ]
-    
-    client = MultiTargetStealthClient(high_priority_wallets)
-    
-    # Monitor each wallet 5 times
-    await client.run_multi_target_monitor(
-        cycles_per_wallet=5,
-        max_total_cycles=None
-    )
 
 if __name__ == "__main__":
     print("🥷 Multi-Target Hyperliquid Stealth Monitor")
     print("=" * 50)
     
-    # Choose your monitoring mode:
-    
-    # 1. Standard monitoring
-    #asyncio.run(main())
-    
-    # 2. Continuous monitoring (uncomment to use)
-    asyncio.run(continuous_monitoring())
-    
-    # 3. Quick scan (uncomment to use)
-    # asyncio.run(quick_scan())
-    
-    # 4. Intensive monitoring (uncomment to use)
-    # asyncio.run(intensive_monitoring())
+    # Run continuous monitoring
+    asyncio.run(main())
