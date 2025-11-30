@@ -3,6 +3,4 @@ sshtunnel
 python-dotenv
 openpyxl
 PyMySQL
-python-dotenv
-openpyxl
-PyMySQL
+websockets

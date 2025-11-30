@@ -1,55 +1,104 @@
-# wallet_pnl Importer
+# Hyperliquid Stealth Monitor & Data Tools
 
-This repository includes `wallet_pnl_importer.py` — a small, production-oriented importer that
-normalizes `wallet_pnl.xlsx` and inserts the data into MySQL. Key characteristics:
+This repository contains a suite of tools for monitoring Hyperliquid wallet activity via WebSocket and importing PnL data, with support for secure database insertion.
 
-- Uses `PyMySQL` and `sshtunnel` for SSH-tunneled connections.
-- Parameterized queries and transactions.
-- Idempotent wallet upserts via `ON DUPLICATE KEY UPDATE ... LAST_INSERT_ID(id)`.
-- Batched snapshot inserts for efficiency.
+## Components
 
-Prerequisites
+### 1. Hyperliquid Stealth Monitor (`hyperliquid_ws_stealthy.py`)
+A sophisticated WebSocket client designed to mimic human browser behavior while collecting real-time data from Hyperliquid.
+
+**Features:**
+- **Stealth Mode:** Mimics Chrome TLS fingerprint, headers, and behavior to avoid detection.
+- **Multi-Target Monitoring:** Rotates through a list of wallets (`wallets.txt`).
+- **Human-like Behavior:** Implements random delays, breaks, and browsing simulation.
+- **Secure Insertion:** Inserts data into a MySQL database, optionally via SSH tunnel.
+- **Resilience:** Handles connection drops and timeouts gracefully.
+
+### 2. Wallet PnL Importer (`wallet_pnl_importer.py`)
+A tool to normalize and import wallet PnL data from Excel files (`wallet_pnl.xlsx`) into the database.
+
+**Features:**
+- **Normalization:** Cleans and formats data (e.g., parsing money strings like `$1.5M`).
+- **Idempotency:** Uses `ON DUPLICATE KEY UPDATE` to prevent duplicate wallet entries.
+- **SSH Tunneling:** Supports secure remote database connections.
+
+## Setup
+
+### Prerequisites
 - Python 3.8+
-- MySQL server reachable from the SSH host (if using SSH) or directly
-- Install dependencies:
+- MySQL Database
 
+### Installation
+
+1.  Clone the repository.
+2.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+### Configuration
+
+1.  Copy `.env.example` to `.env`:
+    ```bash
+    cp .env.example .env
+    ```
+2.  Edit `.env` with your database and SSH credentials:
+    ```ini
+    # Database
+    DB_HOST=localhost
+    DB_PORT=3306
+    DB_USER=root
+    DB_PASSWORD=your_password
+    DB_NAME=hyperliquid
+
+    # SSH Tunnel (Optional)
+    SSH_HOST=your.ssh.server.com
+    SSH_PORT=22
+    SSH_USER=ssh_user
+    SSH_KEY_PATH=/path/to/private/key
+    REMOTE_DB_HOST=127.0.0.1
+    REMOTE_DB_PORT=3306
+    ```
+3.  Create a `wallets.txt` file with one wallet address per line for the monitor to track.
+
+## Usage
+
+### Running the Stealth Monitor
+
+**Standard Mode (SSH Tunnel enabled by default if configured):**
 ```bash
-python -m pip install -r requirements.txt
+python hyperliquid_ws_stealthy.py
 ```
 
-Environment
-Copy `.env.example` to `.env` and edit the values. This project expects the following env vars (matching your final setup):
-
-- `USE_SSH_TUNNEL` (optional): `true` or `false` (script uses `--ssh` flag; this is informational)
-- `SSH_HOST`, `SSH_PORT`, `SSH_USER`, `SSH_KEY_PATH`
-- `REMOTE_DB_HOST`, `REMOTE_DB_PORT`, `LOCAL_BIND_PORT`
-- `DB_USER`, `DB_PASSWORD`, `DB_NAME`
-
-Usage (Windows `cmd.exe`)
-
-Create schema (optional) using SSH tunnel:
-
-```
-python wallet_pnl_importer.py wallet_pnl.xlsx --create-schema --ssh
+**Local Mode (Disable SSH Tunnel):**
+Use this flag if you are running the script on the same machine as the database or have a direct connection.
+```bash
+python hyperliquid_ws_stealthy.py --local
 ```
 
-Run import using SSH tunnel:
+### Running the Importer
 
-```
-python wallet_pnl_importer.py wallet_pnl.xlsx --ssh
-```
-
-Run import directly (no tunnel):
-
-```
+**Import from Excel:**
+```bash
 python wallet_pnl_importer.py wallet_pnl.xlsx
 ```
 
-Notes
-- The importer uses a minimal dependency set (`PyMySQL`, `sshtunnel`, `pandas`, `python-dotenv`).
-- Use a dedicated DB user with least privileges required for INSERT/SELECT.
-- For higher-scale ingestion, consider parallelizing reads and chunked batch inserts and adding monitoring/metrics.
+**Import with SSH Tunnel:**
+```bash
+python wallet_pnl_importer.py wallet_pnl.xlsx --ssh
+```
 
-If you'd like, I can add:
-- A dry-run mode that writes the normalized CSV to disk.
-- Chunked processing for very large files and progress reporting.
+**Create Schema:**
+```bash
+python wallet_pnl_importer.py --create-schema
+```
+
+## Project Structure
+
+- `hyperliquid_ws_stealthy.py`: Main WebSocket monitor script.
+- `wallet_pnl_importer.py`: Excel data importer script.
+- `data_inserter_env.py`: Database connection and insertion logic.
+- `hyperliquid_parser.py`: Parser for WebSocket JSON messages.
+- `break_manager.py`: Logic for simulating human breaks.
+- `schema.sql`: Database schema definition.
+- `wallets.txt`: List of target wallets.
