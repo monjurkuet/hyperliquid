@@ -188,7 +188,7 @@ class MultiTargetFastClient:
             ("Cache-Control", "no-cache"),
             ("User-Agent", self.chrome_user_agent()),
             ("Upgrade", "websocket"),
-            ("Origin", "https://www.coinglass.com"),
+            ("Origin", "https://app.hyperliquid.xyz"),
             ("Sec-WebSocket-Version", "13"),
             ("Accept-Encoding", "gzip, deflate, br"),
             ("Accept-Language", "en-US,en;q=0.9"),
@@ -251,44 +251,83 @@ class MultiTargetFastClient:
         host = parsed_url.hostname
         port = parsed_url.port or 443
 
+        # Prioritize SOCKS_PROXY env var, then configured proxy_url
+        proxy_url = os.environ.get('SOCKS_PROXY') or self.proxy_url
+        
         sock = None
-        if self.proxy_url:
+        if proxy_url:
             try:
                 # Parse proxy URL
-                proxy_parsed = urlparse(self.proxy_url)
+                proxy_parsed = urlparse(proxy_url)
                 proxy_host = proxy_parsed.hostname
                 proxy_port = proxy_parsed.port
-                
-                print(f"[🛡️] Connecting via proxy: {proxy_host}:{proxy_port}")
+                proxy_scheme = proxy_parsed.scheme
+
+                print(f"[🛡️] Connecting via {proxy_scheme.upper()} proxy: {proxy_host}:{proxy_port}")
 
                 # 1. Establish TCP connection to the proxy
                 sock = socket.create_connection((proxy_host, proxy_port), timeout=10)
 
-                # 2. Send HTTP CONNECT request
-                connect_msg = f"CONNECT {host}:{port} HTTP/1.1\r\n"
-                connect_msg += f"Host: {host}:{port}\r\n"
-                # Add Proxy-Authorization if needed (basic auth)
-                if proxy_parsed.username and proxy_parsed.password:
-                    auth = base64.b64encode(f"{proxy_parsed.username}:{proxy_parsed.password}".encode()).decode()
-                    connect_msg += f"Proxy-Authorization: Basic {auth}\r\n"
-                connect_msg += "\r\n"
-                
-                sock.sendall(connect_msg.encode())
+                if proxy_scheme == 'socks5':
+                    # --- SOCKS5 HANDSHAKE ---
+                    # 1. Auth Negotiation (Method 0: No Auth)
+                    # Ver=5, NMethods=1, Method=0
+                    sock.sendall(b"\x05\x01\x00")
+                    auth_resp = sock.recv(2)
+                    if not auth_resp or auth_resp[0:2] != b"\x05\x00":
+                        raise ConnectionError(f"SOCKS5 Auth failed. Response: {auth_resp}")
 
-                # 3. Read response
-                response = b""
-                while b"\r\n\r\n" not in response:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        raise ConnectionError("Proxy closed connection during handshake")
-                    response += chunk
-                
-                # Check for 200 Connection Established
-                status_line = response.split(b"\n")[0].decode()
-                if "200" not in status_line:
-                    raise ConnectionError(f"Proxy handshake failed: {status_line}")
-                
-                print("[✅] Proxy tunnel established")
+                    # 2. Connect Request (ATYP=3 Domain name)
+                    # Ver=5, Cmd=1(Connect), Rsv=0, Atyp=3
+                    # Addr = len(host) + host
+                    # Port = 2 bytes big-endian
+                    req = b"\x05\x01\x00\x03" + bytes([len(host)]) + host.encode() + struct.pack("!H", port)
+                    sock.sendall(req)
+
+                    # 3. Read Reply
+                    # Ver, Rep, Rsv, Atyp (4 bytes)
+                    resp = sock.recv(4)
+                    if not resp or len(resp) < 4:
+                        raise ConnectionError("SOCKS5 handshake closed prematurely")
+                    
+                    if resp[1] != 0x00:
+                        raise ConnectionError(f"SOCKS5 Connect failed with error code: {resp[1]}")
+                    
+                    # Consume the bound address field to clear the buffer
+                    atyp = resp[3]
+                    if atyp == 1: # IPv4
+                        sock.recv(4 + 2)
+                    elif atyp == 3: # Domain
+                        addr_len = sock.recv(1)[0]
+                        sock.recv(addr_len + 2)
+                    elif atyp == 4: # IPv6
+                        sock.recv(16 + 2)
+                        
+                    print("[✅] SOCKS5 tunnel established")
+
+                else:
+                    # --- HTTP CONNECT HANDSHAKE (Fallback) ---
+                    connect_msg = f"CONNECT {host}:{port} HTTP/1.1\r\n"
+                    connect_msg += f"Host: {host}:{port}\r\n"
+                    if proxy_parsed.username and proxy_parsed.password:
+                        auth = base64.b64encode(f"{proxy_parsed.username}:{proxy_parsed.password}".encode()).decode()
+                        connect_msg += f"Proxy-Authorization: Basic {auth}\r\n"
+                    connect_msg += "\r\n"
+                    
+                    sock.sendall(connect_msg.encode())
+
+                    response = b""
+                    while b"\r\n\r\n" not in response:
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            raise ConnectionError("Proxy closed connection during handshake")
+                        response += chunk
+                    
+                    status_line = response.split(b"\n")[0].decode()
+                    if "200" not in status_line:
+                        raise ConnectionError(f"Proxy handshake failed: {status_line}")
+                    
+                    print("[✅] HTTP Proxy tunnel established")
 
             except Exception as e:
                 print(f"[❌] Proxy connection failed: {e}")
@@ -296,18 +335,30 @@ class MultiTargetFastClient:
                     sock.close()
                 raise
 
-        # 4. Connect via websockets (passing the socket if proxy was used)
-        # If sock is None, websockets library handles the connection normally
-        ws = await connect(
-            URL, 
-            ssl=ssl_context, 
-            extra_headers=headers,
-            ping_interval=30,
-            ping_timeout=10,
-            close_timeout=10,
-            sock=sock, # Pass the pre-connected socket (or None)
-            server_hostname=host # Required when using a raw socket with SSL
-        )
+            except Exception as e:
+                print(f"[❌] Proxy connection failed: {e}")
+                if sock:
+                    sock.close()
+                raise
+
+        # 4. Connect via websockets
+        # Prepare arguments dynamically to avoid TypeError with extra_headers + sock
+        connect_args = {
+            "ssl": ssl_context,
+            "ping_interval": 30,
+            "ping_timeout": 10,
+            "close_timeout": 10
+        }
+
+        if sock:
+            connect_args["sock"] = sock
+            connect_args["server_hostname"] = host
+            # Note: We omit extra_headers when using a pre-connected socket 
+            # because it causes a TypeError in some websockets versions.
+        else:
+            connect_args["extra_headers"] = headers
+
+        ws = await connect(URL, **connect_args)
         
         print("[✅] Connection established")
         return ws
