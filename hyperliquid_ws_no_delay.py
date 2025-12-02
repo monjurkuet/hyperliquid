@@ -13,6 +13,8 @@ from websockets import connect
 from websockets.legacy.client import WebSocketClientProtocol
 import threading
 from datetime import datetime, timedelta
+import pymysql
+from urllib.parse import urlparse
 
 # Import the custom break manager - REMOVED for fast version
 # from break_manager import BreakManager 
@@ -42,6 +44,46 @@ class MultiTargetFastClient:
         self.proxy_url = proxy_url
         if self.proxy_url:
             self.configure_proxy()
+
+        # Persistent DB client
+        self.db_client = None
+
+    def _ensure_db_connection(self):
+        """Ensure database connection is active, reconnecting if necessary."""
+        if self.db_client is None:
+            try:
+                self.db_client = MySQLStealthClient(self.ssh_config, self.db_config)
+                self.db_client.__enter__()
+            except Exception as e:
+                print(f"[❌] Failed to connect to DB: {e}")
+                self.db_client = None
+                raise
+
+        # Optional: Check if connection is alive (ping)
+        # Note: MySQLStealthClient.conn is the pymysql connection
+        try:
+            if self.db_client and self.db_client.conn:
+                self.db_client.conn.ping(reconnect=True)
+        except Exception as e:
+            print(f"[⚠️] DB Connection lost ({e}). Reconnecting...")
+            self.close_db()
+            try:
+                self.db_client = MySQLStealthClient(self.ssh_config, self.db_config)
+                self.db_client.__enter__()
+            except Exception as ex:
+                print(f"[❌] Reconnection failed: {ex}")
+                self.db_client = None
+                raise
+
+    def close_db(self):
+        """Safely close the database connection."""
+        if self.db_client:
+            try:
+                self.db_client.__exit__(None, None, None)
+            except Exception as e:
+                print(f"[⚠️] Error closing DB client: {e}")
+            finally:
+                self.db_client = None
 
     def configure_proxy(self):
         """Set environment variables for proxy support."""
@@ -78,17 +120,28 @@ class MultiTargetFastClient:
             # 3. Parse and structure the data for all three tables
             parsed_data = parse_hyperliquid_data(raw_data_dict)
             
-            # 4. Insert using the secure client
-            with MySQLStealthClient(self.ssh_config, self.db_config) as client:
-                client.insert_hyperliquid_data(
-                    wallet_address, 
-                    snapshot_time_ms, 
-                    parsed_data,
-                    raw_data_json # Pass the full raw JSON string
-                )
+            # 4. Insert using the persistent client with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self._ensure_db_connection()
+                    self.db_client.insert_hyperliquid_data(
+                        wallet_address, 
+                        snapshot_time_ms, 
+                        parsed_data,
+                        raw_data_json # Pass the full raw JSON string
+                    )
+                    # If successful, break the retry loop
+                    break
+                except Exception as e:
+                    print(f"[⚠️] DB Insert Error (Attempt {attempt+1}/{max_retries}): {e}")
+                    # Force reconnection on next attempt
+                    self.close_db()
+                    if attempt == max_retries - 1:
+                        print(f"[❌] FAILED TO INSERT data for {wallet_address} after retries.")
                 
         except Exception as e:
-            print(f"[❌] FAILED TO INSERT data for {wallet_address}: {e}")
+            print(f"[❌] Error processing/inserting data for {wallet_address}: {e}")
 
     def generate_session_id(self):
         """Generate realistic Chrome session ID"""
@@ -184,26 +237,76 @@ class MultiTargetFastClient:
         return context
     
     async def connect_fast(self):
-        """Establish connection immediately"""
+        """Establish connection immediately, ensuring proxy usage if configured."""
         self.connection_count += 1
-        
-        # No reconnect delay
         
         ssl_context = self.create_ssl_context()
         headers = self.realistic_headers()
         
         current_wallet = self.get_current_wallet()
         print(f"[🔗] Connecting for wallet: {current_wallet[:10]}...")
-        
-        # No human delay
-        
+
+        # Parse the target URL to get host and port
+        parsed_url = urlparse(URL)
+        host = parsed_url.hostname
+        port = parsed_url.port or 443
+
+        sock = None
+        if self.proxy_url:
+            try:
+                # Parse proxy URL
+                proxy_parsed = urlparse(self.proxy_url)
+                proxy_host = proxy_parsed.hostname
+                proxy_port = proxy_parsed.port
+                
+                print(f"[🛡️] Connecting via proxy: {proxy_host}:{proxy_port}")
+
+                # 1. Establish TCP connection to the proxy
+                sock = socket.create_connection((proxy_host, proxy_port), timeout=10)
+
+                # 2. Send HTTP CONNECT request
+                connect_msg = f"CONNECT {host}:{port} HTTP/1.1\r\n"
+                connect_msg += f"Host: {host}:{port}\r\n"
+                # Add Proxy-Authorization if needed (basic auth)
+                if proxy_parsed.username and proxy_parsed.password:
+                    auth = base64.b64encode(f"{proxy_parsed.username}:{proxy_parsed.password}".encode()).decode()
+                    connect_msg += f"Proxy-Authorization: Basic {auth}\r\n"
+                connect_msg += "\r\n"
+                
+                sock.sendall(connect_msg.encode())
+
+                # 3. Read response
+                response = b""
+                while b"\r\n\r\n" not in response:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        raise ConnectionError("Proxy closed connection during handshake")
+                    response += chunk
+                
+                # Check for 200 Connection Established
+                status_line = response.split(b"\n")[0].decode()
+                if "200" not in status_line:
+                    raise ConnectionError(f"Proxy handshake failed: {status_line}")
+                
+                print("[✅] Proxy tunnel established")
+
+            except Exception as e:
+                print(f"[❌] Proxy connection failed: {e}")
+                if sock:
+                    sock.close()
+                raise
+
+        # 4. Connect via websockets (passing the socket if proxy was used)
+        # If sock is None, websockets library handles the connection normally
         ws = await connect(
             URL, 
             ssl=ssl_context, 
             extra_headers=headers,
             ping_interval=30,
             ping_timeout=10,
-            close_timeout=10
+            close_timeout=10,
+            sock=sock, # Pass the pre-connected socket (or None)
+            server_hostname=host # Required when using a raw socket with SSL
         )
         
         print("[✅] Connection established")
@@ -351,6 +454,7 @@ class MultiTargetFastClient:
         except Exception as e:
             print(f"\n[💥] Unexpected error: {e}")
         finally:
+            self.close_db()
             self.print_session_summary()
 
 # 🎯 Main function (Continuous Monitoring)
