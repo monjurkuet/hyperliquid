@@ -117,7 +117,7 @@ class MySQLStealthClient:
         if data:
             cursor.executemany(sql, data)
 
-    def insert_hyperliquid_data(self, wallet_address: str, snapshot_time_ms: int, parsed_data: Dict, raw_json_string: str):
+    def insert_hyperliquid_data(self, wallet_address: str, snapshot_time_ms: int, parsed_data: Dict):
         """
         Main method to orchestrate the insertion of all structured data into three tables 
         (snapshots, positions, orders) using a transaction.
@@ -138,15 +138,14 @@ class MySQLStealthClient:
                     INSERT INTO hyperliquid_snapshots (
                         wallet_address, snapshot_time_ms, snapshot_datetime, 
                         account_value, total_ntl_pos, total_raw_usd, total_margin_used,
-                        withdrawable, cross_maintenance_margin_used, raw_json
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        withdrawable, cross_maintenance_margin_used
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 cursor.execute(summary_sql, (
                     wallet_address, snapshot_time_ms, snapshot_datetime,
                     summary['account_value'], summary['total_ntl_pos'], 
                     summary['total_raw_usd'], summary['total_margin_used'],
-                    summary['withdrawable'], summary['cross_maintenance_margin_used'],
-                    raw_json_string # Insert the full raw JSON string
+                    summary['withdrawable'], summary['cross_maintenance_margin_used']
                 ))
                 
                 # Get the ID of the newly inserted snapshot record

@@ -281,14 +281,14 @@ class DatabaseManager:
             raise
     
     def insert(self, wallet: str, snapshot_time: int, 
-               parsed_data: Dict, raw_json: str, max_retries: int = 3) -> bool:
+               parsed_data: Dict, max_retries: int = 3) -> bool:
         """Insert data with retry logic (only for connection errors)."""
         
         for attempt in range(max_retries):
             try:
                 self._ensure_connection()
                 self._client.insert_hyperliquid_data(
-                    wallet, snapshot_time, parsed_data, raw_json
+                    wallet, snapshot_time, parsed_data
                 )
                 return True
                 
@@ -472,7 +472,7 @@ class HyperliquidMonitor:
             parsed_data = parse_hyperliquid_data(raw_data)
             
             # Insert to database
-            success = self.db.insert(wallet, snapshot_time, parsed_data, msg)
+            success = self.db.insert(wallet, snapshot_time, parsed_data)
             return success  # True or False, we're done with this wallet
             
         except json.JSONDecodeError as e:

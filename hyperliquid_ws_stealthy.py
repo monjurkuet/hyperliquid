@@ -74,8 +74,7 @@ class MultiTargetStealthClient:
                 client.insert_hyperliquid_data(
                     wallet_address, 
                     snapshot_time_ms, 
-                    parsed_data,
-                    raw_data_json # Pass the full raw JSON string
+                    parsed_data
                 )
                 
         except Exception as e:

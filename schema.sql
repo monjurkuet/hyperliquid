@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS `hyperliquid_snapshots` (
     `cross_maintenance_margin_used` DECIMAL(30, 18) NULL,
 
     -- Audit/Debugging Field: Stores the complete raw JSON message
-    `raw_json` JSON NOT NULL,
+    -- raw_json column removed as per new requirement
 
     PRIMARY KEY (`snapshot_id`),
     -- Indexing for quick lookups by wallet and time
